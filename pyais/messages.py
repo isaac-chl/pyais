@@ -67,6 +67,8 @@ def bit_field(
             'default': default,
             'variable_length': variable_length,
             'is_spare': is_spare,
+            'scale': scale,
+            'offset': offset
         },
         **kwargs
     )
@@ -739,6 +741,8 @@ class Payload(abc.ABC):
             converter = field.metadata['from_converter']
             signed = field.metadata['signed']
             variable_length = field.metadata['variable_length']
+            scale = field.metadata['scale']
+            offset = field.metadata['offset']
 
             val = getattr(self, field.name)
             if val is None:
@@ -749,6 +753,10 @@ class Payload(abc.ABC):
             if d_type in (bool, int):
                 bits = int_to_bin(val, width, signed=signed)
             elif d_type == float:
+                if offset:
+                    val = val - offset
+                if scale:
+                    val = val / scale
                 val = int(val)
                 bits = int_to_bin(val, width, signed=signed)
             elif d_type == str:
