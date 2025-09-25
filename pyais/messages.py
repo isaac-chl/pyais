@@ -39,6 +39,8 @@ def bit_field(
     signed: bool = False,
     variable_length: bool = False,
     is_spare: bool = False,
+    scale: typing.Optional[float] = None,
+    offset: typing.Union[float, int, None] = None,
     **kwargs: typing.Any
 ) -> typing.Any:
     """
@@ -51,6 +53,8 @@ def bit_field(
     @param default:             Optional default value to be used when no value is explicitly passed.
     @param signed:              Set to true if the value is a signed integer
     @param variable_length:     Set to true, if the field can be shorter than width (e.g. for binary data/text)
+    @param scale:               Optional scale to specify units for floats
+    @param offset:              Optional offset for numbers not starting at 0
     @return:                    An attr.ib field instance.
     """
     return attr.ib(
@@ -810,6 +814,8 @@ class Payload(abc.ABC):
             width = field.metadata['width']
             d_type = field.metadata['d_type']
             converter = field.metadata['to_converter']
+            scale = field.metadata['scale']
+            offset = field.metadata['offset']
 
             end = min(length, cur + width)
             bits = bit_arr[cur: end]
@@ -827,6 +833,10 @@ class Payload(abc.ABC):
                     val = float(val)
                 elif d_type == bool:
                     val = bool(val)
+                if scale:
+                    val = val * scale
+                if offset:
+                    val = val + offset
 
             elif d_type == str:
                 val = decode_bin_as_ascii6(bits)
@@ -870,6 +880,9 @@ class Payload(abc.ABC):
 
     def to_json(self, ignore_spare: bool = True) -> str:
         return AISJSONEncoder(indent=4).encode(self.asdict())
+
+    def to_bytes(self) -> bytes:
+        return self.to_bitarray().tobytes()
 
 
 #
@@ -1230,6 +1243,161 @@ class MessageType8Dac200Fid10(Payload):
     course_q = bit_field(1, bool, default=False)
     heading_q = bit_field(1, bool, default=False)
     spare = bit_field(8, bytes, default=0, is_spare=True)
+
+
+@attr.s(slots=True)
+class MessageType8Dac367Fid35(Payload):
+    """Environmental Message"""
+    msg_type = bit_field(6, int, default=8, signed=False)
+    repeat = bit_field(2, int, default=0, signed=False)
+    mmsi = bit_field(30, int, from_converter=from_mmsi)
+    spare_1 = bit_field(2, bytes, default=b"", is_spare=True)
+    dac = bit_field(10, int, default=367, signed=False)
+    fid = bit_field(6, int, default=35, signed=False)
+    sensor_reports = bit_field(896, bytes, variable_length=True)
+
+    def decode_reports(self) -> list["ANY_SENSOR"]:
+        bits = bitarray(self.sensor_reports)
+        reports: list["ANY_SENSOR"] = []
+        for i in range(0, len(bits), 112):
+            # FIXME: Mypy complains about the types here --Isaac
+            report: SensorReport = SensorReport.from_bitarray(bits[i:i + 112])
+            decoded: "ANY_SENSOR" = report.decode()
+            reports.append(decoded)
+        return reports
+
+
+@attr.s(slots=True)
+class SensorReport(Payload):
+    """Sensor Reports for Environmental Messages"""
+    report_type = bit_field(4, int, default=0)
+    utc_day = bit_field(5, int, default=0)
+    utc_hour = bit_field(5, int, default=24)
+    utc_minute = bit_field(6, int, default=60)
+    site_id = bit_field(7, int, default=0)
+    sensor_data = bit_field(85, bytes)
+
+    # FIXME: This should actually only return a sensor report, but I need mypy to stop complaining -Isaac
+    def decode(self) -> "ANY_MESSAGE":
+        try:
+            # This is some real tomfoolery right here -Isaac
+            return SENSOR_TYPE[self.report_type].from_bitarray(self.to_bitarray())
+        except KeyError as e:
+            raise UnknownMessageException(f"The message {self} is not supported!") from e
+
+
+@attr.s(slots=True)
+class SensorReport00(Payload):
+    """Sensor Site Location"""
+    report_type = bit_field(4, int, default=0)
+    utc_day = bit_field(5, int, default=0)
+    utc_hour = bit_field(5, int, default=24)
+    utc_minute = bit_field(6, int, default=60)
+    site_id = bit_field(7, int, default=0)
+    version = bit_field(6, int, default=0)
+    longitude = bit_field(28, float, signed=True, default=10860.0000)  # Default in hex 6791AC0
+    latitude = bit_field(27, float, signed=True, default=5460.0000)  # Default in hex 3412140
+    precision = bit_field(3, int, default=5)
+    altitude = bit_field(12, float, scale=0.1, signed=True, default=200.2)
+    owner = bit_field(4, int, default=0)
+    timeout = bit_field(3, int, default=0)
+    spare = bit_field(2, bytes, default=b'')
+
+
+@attr.s(slots=True)
+class SensorReport01(Payload):
+    """Station ID"""
+    report_type = bit_field(4, int, default=0)
+    utc_day = bit_field(5, int, default=0)
+    utc_hour = bit_field(5, int, default=24)
+    utc_minute = bit_field(6, int, default=60)
+    site_id = bit_field(7, int, default=0)
+    name = bit_field(84, str, default="@@@@@@@@@@@@@@")
+    spare = bit_field(1, bytes, default=b'')
+
+
+@attr.s(slots=True)
+class SensorReport03(Payload):
+    """Water Level"""
+    report_type = bit_field(4, int, default=0)
+    utc_day = bit_field(5, int, default=0)
+    utc_hour = bit_field(5, int, default=24)
+    utc_minute = bit_field(6, int, default=60)
+    site_id = bit_field(7, int, default=0)
+    level_type = bit_field(1, int)
+    level = bit_field(16, float, scale=0.01, signed=True, default=-327.68)
+    trend = bit_field(2, int, default=3)
+    datum = bit_field(5, int, default=14)
+    data_desc = bit_field(3, int, default=0)
+    forecast_type = bit_field(1, int)
+    forecast_level = bit_field(16, float, scale=0.01, signed=True, default=-327.68)
+    forecast_day = bit_field(5, int, default=0)
+    forecast_hour = bit_field(5, int, default=24)
+    forecast_minute = bit_field(6, int, default=60)
+    forecast_duration = bit_field(8, int, default=0)
+    spare = bit_field(17, bytes, default=b'')
+
+
+@attr.s(slots=True)
+class SensorReport04(Payload):
+    """Vertical Current 2D"""
+    report_type = bit_field(4, int, default=0)
+    utc_day = bit_field(5, int, default=0)
+    utc_hour = bit_field(5, int, default=24)
+    utc_minute = bit_field(6, int, default=60)
+    site_id = bit_field(7, int, default=0)
+    c1_speed = bit_field(8, float, scale=0.1, default=24.7)
+    c1_direction = bit_field(9, int, default=360)
+    c1_level = bit_field(9, int, default=362)
+    c2_speed = bit_field(8, float, scale=0.1, default=24.7)
+    c2_direction = bit_field(9, int, default=360)
+    c2_level = bit_field(9, int, default=362)
+    c3_speed = bit_field(8, float, scale=0.1, default=24.7)
+    c3_direction = bit_field(9, int, default=360)
+    c3_level = bit_field(9, int, default=362)
+    data_desc = bit_field(3, int, default=0)
+    spare = bit_field(4, bytes, default=b'')
+
+
+@attr.s(slots=True)
+class SensorReport05(Payload):
+    """Vertical Current 3D"""
+    report_type = bit_field(4, int, default=0)
+    utc_day = bit_field(5, int, default=0)
+    utc_hour = bit_field(5, int, default=24)
+    utc_minute = bit_field(6, int, default=60)
+    site_id = bit_field(7, int, default=0)
+    c1_north = bit_field(9, float, scale=0.1, signed=True, default=-25.6)
+    c1_east = bit_field(9, float, scale=0.1, signed=True, default=-25.6)
+    c1_up = bit_field(9, float, scale=0.1, signed=True, default=-25.6)
+    c1_level = bit_field(9, int, default=362)
+    c2_north = bit_field(9, float, scale=0.1, signed=True, default=-25.6)
+    c2_east = bit_field(9, float, scale=0.1, signed=True, default=-25.6)
+    c2_up = bit_field(9, float, scale=0.1, signed=True, default=-25.6)
+    c2_level = bit_field(9, int, default=362)
+    data_desc = bit_field(3, int, default=0)
+    spare = bit_field(10, bytes, default=b'')
+
+
+@attr.s(slots=True)
+class SensorReport06(Payload):
+    """Horizontal Current"""
+    report_type = bit_field(4, int, default=0)
+    utc_day = bit_field(5, int, default=0)
+    utc_hour = bit_field(5, int, default=24)
+    utc_minute = bit_field(6, int, default=60)
+    site_id = bit_field(7, int, default=0)
+    bearing = bit_field(9, int, default=360)
+    c1_distance = bit_field(9, int, default=362)
+    c1_speed = bit_field(8, float, scale=0.1, default=24.7)
+    c1_direction = bit_field(9, int, default=360)
+    c1_level = bit_field(9, int, default=362)
+    c2_distance = bit_field(9, int, default=362)
+    c2_speed = bit_field(8, float, scale=0.1, default=24.7)
+    c2_direction = bit_field(9, int, default=360)
+    c2_level = bit_field(9, int, default=362)
+    data_desc = bit_field(3, int, default=0)
+    spare = bit_field(3, bytes, default=b'')
 
 
 @attr.s(slots=True)
@@ -2019,7 +2187,44 @@ ANY_MESSAGE = typing.Union[
     MessageType26BroadcastStructured,
     MessageType26BroadcastUnstructured,
     MessageType27,
+    SensorReport,
+    SensorReport00,
+    SensorReport01,
+    SensorReport03,
+    SensorReport04,
+    SensorReport05,
+    SensorReport06,
 ]
+
+# A type hint for environmental message sensor reports
+ANY_SENSOR = typing.Union[
+    SensorReport,
+    SensorReport00,
+    SensorReport01,
+    SensorReport03,
+    SensorReport04,
+    SensorReport05,
+    SensorReport06,
+]
+
+SENSOR_TYPE = {
+    0: SensorReport00,
+    1: SensorReport01,
+    # 2: SensorReport02,
+    3: SensorReport03,
+    4: SensorReport04,
+    5: SensorReport05,
+    6: SensorReport06,
+    # 7: SensorReport07,
+    # 8: SensorReport08,
+    # 9: SensorReport09,
+    # 10: SensorReport10,
+    # 11: SensorReport11,
+    # 12: SensorReport12,
+    # 13: SensorReport13,
+    # 14: SensorReport14,
+    # 15: SensorReport15,
+}
 
 # This is only there for backwards compatibility
 NMEAMessage = AISSentence
